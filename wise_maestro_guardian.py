@@ -152,7 +152,8 @@ class TradeGuardian:
                 params = bot_data.settings.get(primary_reason, {})
                 
                 func_args = {'df': df.copy(), 'params': params, 'rvol': rvol, 'adx_value': adx_value}
-                if primary_reason in ['support_rebound', 'whale_radar']:
+                # يجب أن تكون وظيفة analyze_support_rebound في strategy_scanners.py
+                if primary_reason in ['support_rebound']:
                     func_args.update({'exchange': self.exchange, 'symbol': symbol})
                 
                 # تنفيذ الدالة (سواء كانت async أو sync)
@@ -226,8 +227,9 @@ class TradeGuardian:
 
                         # رفع TSL
                         if trade.get('trailing_sl_active', False): 
+                            current_stop_loss = trade.get('stop_loss', 0)
                             new_sl_candidate = new_highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                            if new_sl_candidate > trade['stop_loss']:
+                            if new_sl_candidate > current_stop_loss:
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
                     # 5. منطق إشعارات الربح المتزايدة
@@ -283,7 +285,9 @@ class TradeGuardian:
                     raise Exception("Balance not freed after cancellation and waiting.")
                     
                 # 1.3 خطوة التنفيذ
-                await self.exchange.create_market_sell_order(symbol, quantity_to_sell)
+                # ملاحظة: OKX يتطلب tdMode: 'cash' في بعض الحالات
+                params = {'tdMode': 'cash'} if self.exchange.id == 'okx' else {}
+                await self.exchange.create_market_sell_order(symbol, quantity_to_sell, params=params)
                 
                 # 1.4 حساب الـ PNL وتحديث DB
                 pnl = (close_price - trade['entry_price']) * quantity_to_sell
@@ -301,9 +305,8 @@ class TradeGuardian:
                 if hasattr(bot_data, 'websocket_manager') and hasattr(bot_data.websocket_manager, 'sync_subscriptions'):
                     await bot_data.websocket_manager.sync_subscriptions()
                 
-                # (لأي محرك تطوري، مثل journaling)
+                # توثيق الصفقة في العقل التطوري (Smart Journaling)
                 if hasattr(bot_data, 'smart_brain') and hasattr(bot_data.smart_brain, 'add_trade_to_journal'):
-                    # جلب تفاصيل الصفقة النهائية من DB
                     async with aiosqlite.connect(DB_FILE) as conn:
                          conn.row_factory = aiosqlite.Row
                          final_trade_details = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))).fetchone()
@@ -344,9 +347,8 @@ class TradeGuardian:
             two_mins_ago = (datetime.now() - timedelta(minutes=2)).isoformat()
             stuck_pending = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
             
-            # (منطق معالجة الـ pending هنا - يتم استخدام fetch_order و activate_trade/cancel_order)
-            # بما أن دالة activate_trade تعتمد على المنصة، فإن هذه الجزئية يجب أن تُستدعى من الملف الرئيسي 
-            # أو تتطلب تمرير دالة activate_trade كـ callback. سنفترض أنها تعالج في الملف الرئيسي لتبسيط الحارس.
+            # ملاحظة: منطق معالجة الـ pending معقد لأنه يتطلب activate_trade و cancel_order
+            # سنفترض أن هذا المنطق يتم استدعاؤه في الملف الرئيسي (binance_maestro/okx_maestro)
             
             # 2. إدارة الصفقات في 'الحضانة' (Incubated Trades - Critical Failures)
             incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
@@ -423,7 +425,8 @@ class TradeGuardian:
                 concentration_pct = (value / total_portfolio_value) * 100
                 if concentration_pct > PORTFOLIO_RISK_RULES['max_asset_concentration_pct']:
                     await self.safe_send_message(f"⚠️ **تنبيه الرجل الحكيم (تركيز الأصل):**\n"
-                                               f"عملة `{asset}` تشكل **{concentration_pct:.1f}%** من المحفظة (> {PORTFOLIO_RISK_RULES['max_asset_concentration_pct']}%).")
+                                               f"عملة `{asset}` تشكل **{concentration_pct:.1f}%** من المحفظة (> {PORTFOLIO_RISK_RULES['max_asset_concentration_pct']}%).\n"
+                                               f"الرجاء مراجعة المحفظة.")
                 
                 # 2. تركيز القطاع
                 sector = SECTOR_MAP.get(asset, 'Other')
@@ -433,7 +436,8 @@ class TradeGuardian:
                 concentration_pct = (value / total_portfolio_value) * 100
                 if concentration_pct > PORTFOLIO_RISK_RULES['max_sector_concentration_pct']:
                      await self.safe_send_message(f"⚠️ **تنبيه الرجل الحكيم (تركيز قطاعي):**\n"
-                                                f"أصول قطاع **'{sector}'** تشكل **{concentration_pct:.1f}%** من المحفظة (> {PORTFOLIO_RISK_RULES['max_sector_concentration_pct']}%).")
+                                                f"أصول قطاع **'{sector}'** تشكل **{concentration_pct:.1f}%** من المحفظة (> {PORTFOLIO_RISK_RULES['max_sector_concentration_pct']}%).\n"
+                                                f"الرجاء تنويع الأصول.")
 
         except Exception as e:
             logger.error(f"Wise Man: Error during portfolio risk review: {e}", exc_info=True)
