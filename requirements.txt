@@ -1,0 +1,10 @@
+ccxt[async]
+pandas
+pandas-ta
+python-telegram-bot[ext, job-queue]
+aiosqlite
+httpx
+feedparser
+nltk
+websockets
+scipy
