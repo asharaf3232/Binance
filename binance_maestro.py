@@ -73,7 +73,10 @@ class BotState:
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
-trade_management_lock = asyncio.Lock()
+# تم نقل هذا المتغير إلى كائن الحالة المشترك bot_data
+# trade_management_lock = asyncio.Lock()
+bot_data.trade_management_lock = asyncio.Lock()
+
 
 # --- WebSocket Manager ---
 class WebSocketManager:
@@ -137,7 +140,16 @@ class WebSocketManager:
 
             if event_type == '24hrTicker':
                 if bot_data.guardian:
-                    await bot_data.guardian.handle_ticker_update(payload)
+                    # --- [التعديل هنا] ---
+                    # 1. تحويل بيانات باينانس إلى التنسيق الموحد
+                    standard_ticker = {
+                        'symbol': payload['s'].replace('USDT', '/USDT'),
+                        'price': float(payload['c'])
+                    }
+                    # 2. إرسال البيانات الموحدة إلى الحارس المشترك
+                    await bot_data.guardian.handle_ticker_update(standard_ticker)
+                    # --- [نهاية التعديل] ---
+
             elif event_type == 'executionReport':
                 if payload.get('x') == 'TRADE' and payload.get('S') == 'BUY' and payload.get('X') == 'FILLED':
                     await handle_order_update(payload)
@@ -300,7 +312,6 @@ async def worker_batch(queue, signals_list, errors_list):
             if len(ohlcv) < 50: queue.task_done(); continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # --- Confluence Filter ---
             if settings.get('multi_timeframe_confluence_enabled', True):
                 try:
                     ohlcv_1h_task = exchange.fetch_ohlcv(symbol, '1h', limit=100)
@@ -316,10 +327,7 @@ async def worker_batch(queue, signals_list, errors_list):
                     if not (is_1h_bullish and is_4h_bullish):
                         queue.task_done(); continue
                 except Exception: pass
-            
-            # --- Other Filters (Spread, Volume, etc.) would be added here ---
 
-            # --- Scanners ---
             confirmed_reasons = []
             if 'whale_radar' in settings['active_scanners']:
                 if await scanners.filter_whale_radar(exchange, symbol, settings):
@@ -418,7 +426,6 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
-    # Handle blacklist
     if 'blacklist_action' in context.user_data:
         action = context.user_data.pop('blacklist_action')
         blacklist = bot_data.settings.get('asset_blacklist', [])
@@ -430,12 +437,10 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         save_settings()
         await update.message.reply_text(f"✅ تم تحديث القائمة السوداء.")
-        # Refresh menu
         dummy_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer': (lambda *args, **kwargs: asyncio.sleep(0))})
         await ui_handlers.show_blacklist_menu(Update(update.update_id, callback_query=dummy_query), context)
         return
 
-    # Handle other parameters
     if not (setting_key := context.user_data.get('setting_to_change')): return
     try:
         keys = setting_key.split('_'); current_level = bot_data.settings
