@@ -18,7 +18,7 @@ from _strategy_scanners import find_col
 logger = logging.getLogger(__name__)
 
 # ملاحظة: سيتم تعيين هذه المتغيرات في الملف الرئيسي لكل منصة
-DB_FILE = 'wise_maestro_db.db' 
+DB_FILE = None 
 bot_data = None # سيتم تمرير كائن الحالة العامة للبوت
 
 class TradeGuardian:
@@ -26,19 +26,16 @@ class TradeGuardian:
         """
         وحدة الحارس والرقابة المزدوجة (WiseMan + Reviewer).
         """
-        global DB_FILE
+        global DB_FILE, bot_data
         DB_FILE = db_file
-        
-        global bot_data
         bot_data = bot_state_object
-        
         self.exchange = exchange
         self.application = application
         self.telegram_chat_id = bot_data.TELEGRAM_CHAT_ID 
-        logger.info("🛡️ Wise Maestro Guardian (Trade Manager) initialized.")
+        logger.info("🛡️ Wise Maestro Guardian (Shared Logic) initialized.")
 
     async def safe_send_message(self, text, **kwargs):
-        """إرسال آمن للرسائل عبر تيليجرام (يجب أن يتم تمريرها من الملف الرئيسي)."""
+        """إرسال آمن للرسائل عبر تيليجرام."""
         if self.telegram_chat_id:
             try:
                 await self.application.bot.send_message(self.telegram_chat_id, text, parse_mode='Markdown', **kwargs)
@@ -101,6 +98,7 @@ class TradeGuardian:
                     if is_strong:
                         new_tp = trade['take_profit'] * 1.05
                         await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade['id']))
+                        await conn.commit() # Commit after each update
                         logger.info(f"Wise Man recommends extending target for {symbol}. New TP: {new_tp:.4f}")
                         await self.safe_send_message(f"🧠 **نصيحة من الرجل الحكيم | #{trade['id']} {symbol}**\nتم رصد زخم قوي. تم تمديد الهدف إلى `${new_tp:.4f}`.")
 
@@ -109,7 +107,8 @@ class TradeGuardian:
                 
                 await asyncio.sleep(1)
             
-            await conn.commit()
+            # The commit outside the loop might be intended, but committing inside ensures changes are saved per trade
+            # await conn.commit()
 
     # =======================================================================================
     # --- B. منطق المراجع الذكي (Intelligent Reviewer - Signal Validity Check) ---
@@ -152,7 +151,6 @@ class TradeGuardian:
                 params = bot_data.settings.get(primary_reason, {})
                 
                 func_args = {'df': df.copy(), 'params': params, 'rvol': rvol, 'adx_value': adx_value}
-                # يجب أن تكون وظيفة analyze_support_rebound في strategy_scanners.py
                 if primary_reason in ['support_rebound']:
                     func_args.update({'exchange': self.exchange, 'symbol': symbol})
                 
@@ -169,18 +167,20 @@ class TradeGuardian:
         
         logger.info("🧠 Intelligent Reviewer: Review cycle complete.")
 
+
     # =======================================================================================
     # --- C. منطق إدارة الصفقة في الوقت الحقيقي (Ticker Handler) ---
     # =======================================================================================
-
-    async def handle_ticker_update(self, ticker_data):
+    
+    async def handle_ticker_update(self, standard_ticker: dict):
         """
-        يتم استدعاء هذه الدالة مع كل تحديث للسعر عبر WebSocket.
+        [العقل الموحد] يتم استدعاؤها مع كل تحديث للسعر بتنسيق موحد.
+        تنسيق موحد متوقع: {'symbol': 'BTC/USDT', 'price': 60000.0}
         """
-        # نستخدم قفل إدارة التداول لضمان عدم تداخل الإجراءات
+        # ملاحظة: تم تعديل trade_management_lock ليتم جلبه من كائن الحالة المشترك bot_data
         async with bot_data.trade_management_lock:
-            symbol = ticker_data['s'].replace('USDT', '/USDT') if 's' in ticker_data else ticker_data['instId'].replace('-', '/')
-            current_price = float(ticker_data['c']) if 'c' in ticker_data else float(ticker_data['last'])
+            symbol = standard_ticker['symbol']
+            current_price = standard_ticker['price']
             
             try:
                 async with aiosqlite.connect(DB_FILE) as conn:
@@ -198,12 +198,11 @@ class TradeGuardian:
                         await self._close_trade(trade, reason, current_price)
                         return
 
-                    # 2. الأولوية: اقتناص الزخم (Momentum Scalp Mode)
+                    # 2. الأولوية: وضع اقتناص الزخم (Momentum Scalp Mode)
                     if settings.get('momentum_scalp_mode_enabled', False):
                         scalp_target = trade['entry_price'] * (1 + settings['momentum_scalp_target_percent'] / 100)
                         if current_price >= scalp_target and current_price > trade['entry_price']:
                             await self._close_trade(trade, "ناجحة (Scalp Mode)", current_price)
-                            logger.info(f"💸 Momentum Scalp: Closed #{trade['id']} at {current_price:.4f}")
                             return
 
                     # 3. الأولوية: الهدف (TP)
@@ -233,7 +232,7 @@ class TradeGuardian:
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
                     # 5. منطق إشعارات الربح المتزايدة
-                    if settings.get('incremental_notifications_enabled', False):
+                    if settings.get('incremental_notifications_enabled', True):
                         last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
                         increment = settings['incremental_notification_percent'] / 100
                         if current_price >= last_notified * (1 + increment):
@@ -245,8 +244,7 @@ class TradeGuardian:
 
             except Exception as e: 
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
-
-
+                
     # =======================================================================================
     # --- D. الإغلاق المصّلب (Hardened Closure - The Blackbox Logic) ---
     # =======================================================================================
@@ -285,7 +283,6 @@ class TradeGuardian:
                     raise Exception("Balance not freed after cancellation and waiting.")
                     
                 # 1.3 خطوة التنفيذ
-                # ملاحظة: OKX يتطلب tdMode: 'cash' في بعض الحالات
                 params = {'tdMode': 'cash'} if self.exchange.id == 'okx' else {}
                 await self.exchange.create_market_sell_order(symbol, quantity_to_sell, params=params)
                 
@@ -298,14 +295,11 @@ class TradeGuardian:
                     await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
                     await conn.commit()
                 
-                # إرسال الإشعار
                 await self.safe_send_message(f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
                 
-                # تحديث الاشتراكات (يجب أن يتم استدعاؤه في الملف الرئيسي)
                 if hasattr(bot_data, 'websocket_manager') and hasattr(bot_data.websocket_manager, 'sync_subscriptions'):
                     await bot_data.websocket_manager.sync_subscriptions()
                 
-                # توثيق الصفقة في العقل التطوري (Smart Journaling)
                 if hasattr(bot_data, 'smart_brain') and hasattr(bot_data.smart_brain, 'add_trade_to_journal'):
                     async with aiosqlite.connect(DB_FILE) as conn:
                          conn.row_factory = aiosqlite.Row
@@ -322,13 +316,11 @@ class TradeGuardian:
         # 2. فشل الإغلاق (النقل إلى الحضانة)
         logger.critical(f"CRITICAL: Hardened closure for #{trade_id} failed after {max_retries} retries. MOVING TO INCUBATOR.")
         async with aiosqlite.connect(DB_FILE) as conn:
-            # نغير الحالة إلى 'incubated' ليتم معالجتها بواسطة المشرف
             await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
             await conn.commit()
         await self.safe_send_message(f"⚠️ **فشل الإغلاق الحرج | #{trade_id} {symbol}**\nفشل الإغلاق بعد عدة محاولات. تم نقل الصفقة إلى *الحضانة* للمراقبة. الرجاء مراجعة رصيدك يدوياً.")
         if hasattr(bot_data, 'websocket_manager') and hasattr(bot_data.websocket_manager, 'sync_subscriptions'):
             await bot_data.websocket_manager.sync_subscriptions()
-
 
     # =======================================================================================
     # --- E. منطق المشرف (Supervisor - Recovery & Monitoring) ---
@@ -336,21 +328,14 @@ class TradeGuardian:
 
     async def the_supervisor_job(self, context: object = None):
         """
-        المشرف: يعالج الصفقات العالقة (pending) ويدير الحضانة (incubated) ويحاول التعافي.
+        المشرف: يعالج الصفقات العالقة ويدير الحضانة ويحاول التعافي.
         """
         logger.info("🕵️ Supervisor: Running audit and recovery checks...")
         
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             
-            # 1. التحقق من الصفقات العالقة في حالة 'pending'
-            two_mins_ago = (datetime.now() - timedelta(minutes=2)).isoformat()
-            stuck_pending = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
-            
-            # ملاحظة: منطق معالجة الـ pending معقد لأنه يتطلب activate_trade و cancel_order
-            # سنفترض أن هذا المنطق يتم استدعاؤه في الملف الرئيسي (binance_maestro/okx_maestro)
-            
-            # 2. إدارة الصفقات في 'الحضانة' (Incubated Trades - Critical Failures)
+            # 1. إدارة الصفقات في 'الحضانة' (Incubated Trades)
             incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
 
             for trade_data in incubated_trades:
@@ -369,7 +354,6 @@ class TradeGuardian:
                     # الشرط الثاني: ما زالت في منطقة الخطر - حاول الإغلاق مجدداً
                     else:
                         logger.info(f"Supervisor: Trade #{trade['id']} still in danger. Retrying Hardened Closure.")
-                        # المشرف يستدعي الإغلاق المصّلب مباشرة لضمان التنفيذ
                         await self._close_trade(trade, f"فاشلة (SL-Supervisor)", current_price)
                 
                 except Exception as e:
@@ -378,7 +362,6 @@ class TradeGuardian:
                 await asyncio.sleep(5)
     
         logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
-
 
     # =======================================================================================
     # --- F. مراجعة مخاطر المحفظة (Portfolio Risk Review) ---
