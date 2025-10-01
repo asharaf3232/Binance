@@ -86,10 +86,8 @@ def analyze_sniper_pro(df, params, rvol, adx_value):
 
 def analyze_rsi_divergence(df, params, rvol, adx_value):
     """دايفرجنس RSI: دايفرجنس صاعد مع اختراق تأكيدي (يتطلب scipy)."""
-    # --- [الإصلاح] إضافة التحقق ---
     if not SCIPY_AVAILABLE:
         return None
-    # -----------------------------
 
     df.ta.rsi(length=14, append=True)
     rsi_col = find_col(df.columns, f"RSI_14")
@@ -148,7 +146,7 @@ def analyze_bollinger_reversal(df, params, rvol, adx_value):
 # --- B. فلاتر التوافق والعمق (Confluence & Depth Filters) ---
 # =======================================================================================
 
-async def filter_whale_radar(exchange, symbol):
+async def filter_whale_radar(exchange, symbol, settings):
     """رادار الحيتان: يبحث عن أوامر شراء كبيرة في عمق السوق (Order Book)."""
     try:
         ob = await exchange.fetch_order_book(symbol, limit=20)
@@ -156,7 +154,7 @@ async def filter_whale_radar(exchange, symbol):
         
         bids_value = sum(float(price) * float(qty) for price, qty in ob['bids'][:10])
         
-        if bids_value > 30000:
+        if bids_value > settings.get("whale_radar_threshold_usd", 30000.0):
             return True
     except Exception: return False
     return False
