@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🛡️ Wise Maestro Guardian - v2.0 (Final Fusion Edition) 🛡️ ---
+# --- 🛡️ Wise Maestro Guardian - v2.1 (Hardened Edition) 🛡️ ---
 # =======================================================================================
-# --- سجل التغييرات للإصدار المدمج ---
+# --- سجل التغييرات للإصدار المُصَلَّب ---
+#   ✅ [إصلاح قاتل] إضافة دالة مساعدة (_safe_get_indicator) لجلب المؤشرات بأمان.
+#   ✅ [إصلاح قاتل] تحديث جميع استدعاءات المؤشرات (ADX) لاستخدام الدالة الآمنة.
+#   ✅ [إصلاح قاتل] إضافة كتل try-except حول العمليات الحساسة لمنع الانهيار.
 #   ✅ [الترقية النهائية] دمج "بروتوكول الإغلاق المُصَلَّب" من بوت Binance V6.6.
 #   ✅ [الترقية النهائية] دمج "المشرف الذكي" لمعالجة الصفقات العالقة والمعلقة.
 #   ✅ [الترقية النهائية] إضافة تقارير إغلاق تحليلية مفصلة (كفاءة الخروج، مدة الصفقة).
@@ -38,7 +41,7 @@ class TradeGuardian:
         self.exchange = exchange
         self.application = application
         self.telegram_chat_id = bot_data.TELEGRAM_CHAT_ID 
-        logger.info("🛡️ Wise Maestro Guardian (Final Fusion Edition) initialized.")
+        logger.info("🛡️ Wise Maestro Guardian (Hardened Edition) initialized.")
 
     async def safe_send_message(self, text, **kwargs):
         if self.telegram_chat_id:
@@ -47,7 +50,23 @@ class TradeGuardian:
             except Exception as e:
                 logger.error(f"Telegram Send Error: {e}")
 
-    # --- [الترقية النهائية] دالة مساعدة من بوت باينانس لتنسيق مدة الصفقة ---
+    # --- [إصلاح قاتل] دالة جديدة لجلب المؤشرات بأمان ---
+    def _safe_get_indicator(self, df: pd.DataFrame, indicator_prefix: str, default_value=0.0, index=-1):
+        """
+        تجلب القيمة الأخيرة لمؤشر فني بأمان من DataFrame.
+        تُرجع قيمة افتراضية إذا لم يتم العثور على عمود المؤشر أو حدث خطأ.
+        """
+        try:
+            col_name = find_col(df.columns, indicator_prefix)
+            if col_name and not df[col_name].dropna().empty:
+                return df[col_name].iloc[index]
+            # logger.warning(f"Safe get: Indicator column '{indicator_prefix}' not found or is empty.")
+            return default_value
+        except (IndexError, KeyError) as e:
+            logger.error(f"Safe get: Error accessing indicator '{indicator_prefix}': {e}")
+            return default_value
+
+    # --- دالة مساعدة من بوت باينانس لتنسيق مدة الصفقة ---
     def _format_duration(self, duration_delta: timedelta) -> str:
         seconds = duration_delta.total_seconds()
         if seconds < 60: return "أقل من دقيقة"
@@ -80,10 +99,11 @@ class TradeGuardian:
             try:
                 btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=30)
                 btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                btc_momentum = ta.mom(btc_df['close'], length=10).iloc[-1]
+                # --- [إصلاح قاتل] حساب زخم البيتكوين بأمان ---
+                btc_momentum = ta.mom(btc_df['close'], length=10).iloc[-1] if not btc_df.empty else 0
             except Exception as e:
                 logger.error(f"Wise Man: Could not fetch BTC data for comparison: {e}")
-                btc_momentum = 1
+                btc_momentum = 0 # قيمة محايدة
 
             for trade_data in active_trades:
                 trade = dict(trade_data)
@@ -91,13 +111,19 @@ class TradeGuardian:
                 
                 try:
                     ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
+                    if not ohlcv: continue # تخطي إذا لم تكن هناك بيانات
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     current_price = df['close'].iloc[-1]
                     
                     df['ema_fast'] = ta.ema(df['close'], length=10)
                     df['ema_slow'] = ta.ema(df['close'], length=30)
-                    is_weak = current_price < df['ema_fast'].iloc[-1] and current_price < df['ema_slow'].iloc[-1]
                     
+                    # --- [إصلاح قاتل] التحقق من الضعف بأمان ---
+                    try:
+                        is_weak = current_price < df['ema_fast'].iloc[-1] and current_price < df['ema_slow'].iloc[-1]
+                    except IndexError:
+                        is_weak = False # افتراض عدم وجود ضعف إذا كانت البيانات غير كافية
+
                     if is_weak and btc_momentum < 0 and current_price < trade['entry_price']:
                         logger.warning(f"Wise Man recommends early exit for {symbol} (Weakness + BTC down).")
                         await self._close_trade(trade, "إغلاق مبكر (Wise Man)", current_price)
@@ -106,7 +132,8 @@ class TradeGuardian:
 
                     current_profit_pct = (current_price / trade['entry_price'] - 1) * 100
                     df.ta.adx(append=True)
-                    current_adx = df[find_col(df.columns, "ADX_14")].iloc[-1]
+                    # --- [إصلاح قاتل] استخدام الدالة الآمنة لجلب ADX ---
+                    current_adx = self._safe_get_indicator(df, "ADX_14", default_value=20)
                     is_strong = current_profit_pct > 3.0 and current_adx > 30
 
                     if is_strong:
@@ -145,12 +172,24 @@ class TradeGuardian:
 
             try:
                 ohlcv = await self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
+                if not ohlcv or len(ohlcv) < 50: continue # تخطي إذا كانت البيانات غير كافية
+                
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df = df.set_index('timestamp').sort_index()
 
-                df.ta.adx(append=True); adx_value = df[find_col(df.columns, "ADX_")].iloc[-2]
-                df['volume_sma'] = ta.sma(df['volume'], length=20); rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
+                df.ta.adx(append=True)
+                # --- [إصلاح قاتل] استخدام الدالة الآمنة لجلب ADX ---
+                adx_value = self._safe_get_indicator(df, "ADX_", default_value=20, index=-2)
+
+                # --- [إصلاح قاتل] حساب الحجم النسبي بأمان ---
+                try:
+                    df['volume_sma'] = ta.sma(df['volume'], length=20)
+                    # التحقق من أن القيمة ليست صفرًا قبل القسمة
+                    volume_sma_val = df['volume_sma'].iloc[-2]
+                    rvol = (df['volume'].iloc[-2] / volume_sma_val) if volume_sma_val > 0 else 1.0
+                except (IndexError, ZeroDivisionError):
+                    rvol = 1.0 # قيمة محايدة
 
                 analyzer_func = SCANNERS[primary_reason]
                 params = bot_data.settings.get(primary_reason, {})
@@ -297,7 +336,8 @@ class TradeGuardian:
                 await conn.commit()
             
             trade_entry_time = datetime.fromisoformat(trade['timestamp'])
-            duration_delta = datetime.now(EGYPT_TZ) - trade_entry_time
+            # EGYPT_TZ must be defined in your main bot file, e.g., from pytz import timezone; EGYPT_TZ = timezone('Africa/Cairo')
+            duration_delta = datetime.now() - trade_entry_time.replace(tzinfo=None) # Naive datetime for subtraction
             trade_duration = self._format_duration(duration_delta)
             
             exit_efficiency_str = ""
@@ -357,7 +397,8 @@ class TradeGuardian:
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             
-            stuck_threshold = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
+            # Note: EGYPT_TZ must be defined in your main bot file.
+            stuck_threshold = (datetime.now() - timedelta(minutes=2)).isoformat()
             stuck_pending = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp < ?", (stuck_threshold,))).fetchall()
 
             if stuck_pending:
