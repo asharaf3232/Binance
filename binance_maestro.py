@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Wise Maestro Bot - Binance Edition v1.7 (FINAL & INTEGRATED) 🚀 ---
+# --- 🚀 Wise Maestro Bot - Final Fusion v2.0 🚀 ---
 # =======================================================================================
-# This is the 100% complete, final, and unified main file.
-# It contains all startup logic, job definitions, and UI handlers logic.
-
 import os
 import logging
 import asyncio
@@ -24,6 +21,7 @@ from telegram.error import Forbidden, BadRequest, TimedOut
 from dotenv import load_dotenv
 import websockets
 import websockets.exceptions
+import redis.asyncio as redis
 
 # استيراد الوحدات المنفصلة
 from _settings_config import *
@@ -40,6 +38,7 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 
 # --- إعدادات أساسية ---
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
@@ -66,17 +65,17 @@ class BotState:
         self.strategy_performance = {}
         self.pending_strategy_proposal = {}
         self.last_deep_analysis_time = defaultdict(float)
-        self.guardian = None # سيتم تهيئة الحارس الذكي هنا
-        self.smart_brain = None # سيتم تهيئة العقل التطوري هنا
+        self.guardian = None
+        self.smart_brain = None
         self.TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID
+        self.current_market_regime = "UNKNOWN"
+        self.redis_client = None
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 
-# =======================================================================================
-# --- WebSocket Manager (Formerly TradeGuardian in this file) ---
-# =======================================================================================
+# --- WebSocket Manager ---
 class WebSocketManager:
     def __init__(self, exchange, application):
         self.exchange = exchange
@@ -112,13 +111,11 @@ class WebSocketManager:
         self.keep_alive_task = asyncio.create_task(self._keep_alive_listen_key())
         while self.is_running:
             if not self.listen_key and not await self._get_listen_key():
-                await asyncio.sleep(60)
-                continue
+                await asyncio.sleep(60); continue
             streams = [f"{s.lower().replace('/', '')}@ticker" for s in self.public_subscriptions]
             if self.listen_key: streams.append(self.listen_key)
             if not streams:
-                await asyncio.sleep(10)
-                continue
+                await asyncio.sleep(10); continue
             uri = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
             try:
                 async with websockets.connect(uri, ping_interval=180, ping_timeout=60) as ws:
@@ -139,7 +136,6 @@ class WebSocketManager:
             event_type = payload.get('e')
 
             if event_type == '24hrTicker':
-                # نستدعي المعالج من وحدة الحارس الذكي
                 if bot_data.guardian:
                     await bot_data.guardian.handle_ticker_update(payload)
             elif event_type == 'executionReport':
@@ -167,7 +163,7 @@ class WebSocketManager:
         if self.keep_alive_task: self.keep_alive_task.cancel()
         if self.ws and not self.ws.closed: await self.ws.close()
 
-# --- دوال مساعدة ووظائف أساسية ---
+# --- Helper, Settings & DB Management ---
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -209,7 +205,17 @@ async def safe_send_message(bot, text, **kwargs):
         except Exception as e:
             logger.error(f"Unknown Telegram Send Error: {e}.")
             await asyncio.sleep(2)
-            
+
+async def broadcast_signal_to_redis(signal):
+    if not bot_data.redis_client: return
+    try:
+        signal_to_broadcast = {k: (v.isoformat() if isinstance(v, (datetime, pd.Timestamp)) else v) for k, v in signal.items()}
+        await bot_data.redis_client.publish("trade_signals", json.dumps(signal_to_broadcast))
+        logger.info(f"📡 Broadcasted signal for {signal['symbol']} to Redis.")
+    except Exception as e:
+        logger.error(f"Redis Broadcast Error: {e}", exc_info=True)
+
+# --- Core Trading Logic ---
 async def log_pending_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -258,8 +264,7 @@ async def has_active_trade_for_symbol(symbol: str) -> bool:
         return (await (await conn.execute("SELECT 1 FROM trades WHERE symbol = ? AND status IN ('active', 'pending') LIMIT 1", (symbol,))).fetchone()) is not None
 
 async def initiate_real_trade(signal):
-    if not bot_data.trading_enabled:
-        logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
+    if not bot_data.trading_enabled: return False
     try:
         settings, exchange = bot_data.settings, bot_data.exchange
         trade_size = settings['real_trade_size_usdt']
@@ -275,50 +280,56 @@ async def initiate_real_trade(signal):
             await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`...")
             return True
         else:
-            await exchange.cancel_order(buy_order['id'], signal['symbol'])
-            return False
+            await exchange.cancel_order(buy_order['id'], signal['symbol']); return False
     except Exception as e:
-        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
-        return False
+        logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
 
 async def handle_order_update(order_data):
     if order_data.get('X') == 'FILLED' and order_data.get('S') == 'BUY':
         await activate_trade(order_data['i'], order_data['s'].replace('USDT', '/USDT'))
 
 # --- Scanner Worker and Main Scan Function ---
-async def fetch_ohlcv_batch(exchange, symbols, timeframe, limit):
-    tasks = [exchange.fetch_ohlcv(s, timeframe, limit=limit) for s in symbols]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    return {symbols[i]: results[i] for i in range(len(symbols)) if not isinstance(results[i], Exception)}
-
 async def worker_batch(queue, signals_list, errors_list):
     settings, exchange = bot_data.settings, bot_data.exchange
     while not queue.empty():
+        symbol = ""
         try:
             market = await queue.get()
             symbol = market['symbol']
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
-            if len(ohlcv) < 50:
-                queue.task_done(); continue
+            if len(ohlcv) < 50: queue.task_done(); continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # Run Filters... (Simplified for brevity, assuming filters logic here)
-            # Run Scanners...
+            # --- Confluence Filter ---
+            if settings.get('multi_timeframe_confluence_enabled', True):
+                try:
+                    ohlcv_1h_task = exchange.fetch_ohlcv(symbol, '1h', limit=100)
+                    ohlcv_4h_task = exchange.fetch_ohlcv(symbol, '4h', limit=100)
+                    ohlcv_1h, ohlcv_4h = await asyncio.gather(ohlcv_1h_task, ohlcv_4h_task)
+                    df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_1h.ta.macd(append=True); df_1h.ta.sma(length=50, append=True)
+                    is_1h_bullish = (df_1h[scanners.find_col(df_1h.columns, "MACD_")].iloc[-1] > df_1h[scanners.find_col(df_1h.columns, "MACDs_")].iloc[-1]) and \
+                                    (df_1h['close'].iloc[-1] > df_1h[scanners.find_col(df_1h.columns, "SMA_50")].iloc[-1])
+                    df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_4h.ta.ema(length=200, append=True)
+                    is_4h_bullish = df_4h['close'].iloc[-1] > df_4h[scanners.find_col(df_4h.columns, "EMA_200")].iloc[-1]
+                    if not (is_1h_bullish and is_4h_bullish):
+                        queue.task_done(); continue
+                except Exception: pass
+            
+            # --- Other Filters (Spread, Volume, etc.) would be added here ---
+
+            # --- Scanners ---
             confirmed_reasons = []
             if 'whale_radar' in settings['active_scanners']:
                 if await scanners.filter_whale_radar(exchange, symbol, settings):
                     confirmed_reasons.append("whale_radar")
-
             for name in settings['active_scanners']:
                 if name == 'whale_radar': continue
-                strategy_func = scanners.SCANNERS.get(name)
-                if not strategy_func: continue
-                
+                if not (strategy_func := scanners.SCANNERS.get(name)): continue
                 params = settings.get(name, {})
                 func_args = {'df': df.copy(), 'params': params, 'rvol': 0, 'adx_value': 0}
-                if name in ['support_rebound']:
-                    func_args.update({'exchange': exchange, 'symbol': symbol})
-                
+                if name == 'support_rebound': func_args.update({'exchange': exchange, 'symbol': symbol})
                 result = await strategy_func(**func_args) if asyncio.iscoroutinefunction(strategy_func) else strategy_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
                 if result: confirmed_reasons.append(result['reason'])
 
@@ -329,18 +340,16 @@ async def worker_batch(queue, signals_list, errors_list):
                 atr_col = scanners.find_col(df.columns, "ATRr_14")
                 atr = df[atr_col].iloc[-1] if atr_col and pd.notna(df[atr_col].iloc[-1]) else df['high'].iloc[-1] - df['low'].iloc[-1]
                 risk = atr * settings['atr_sl_multiplier']
-                stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
-                signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
+                signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": entry_price + (risk * settings['risk_reward_ratio']), "stop_loss": entry_price - risk, "reason": reason_str})
             queue.task_done()
         except Exception as e:
-            errors_list.append(symbol if 'symbol' in locals() else 'Unknown')
+            errors_list.append(symbol if symbol else 'Unknown')
             if not queue.empty(): queue.task_done()
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if not bot_data.trading_enabled: return
-        scan_start_time = time.time()
-        logger.info("--- Starting new Maestro scan... ---")
+        scan_start_time = time.time(); logger.info("--- Starting new Maestro scan... ---")
         settings = bot_data.settings
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending')")).fetchone())[0]
@@ -348,7 +357,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         
         top_markets = await brain.get_binance_markets(bot_data)
         if not top_markets: return
-
         queue, signals_found, analysis_errors = asyncio.Queue(), [], []
         for market in top_markets:
             await queue.put(market)
@@ -356,22 +364,47 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         worker_tasks = [asyncio.create_task(worker_batch(queue, signals_found, analysis_errors)) for _ in range(settings.get("worker_threads", 10))]
         await queue.join()
         for task in worker_tasks: task.cancel()
-
+        
         trades_opened_count = 0
-        available_slots = settings['max_concurrent_trades'] - active_trades_count
         for signal in signals_found:
-            if available_slots <= 0: break
+            if active_trades_count >= settings['max_concurrent_trades']: break
             if not await has_active_trade_for_symbol(signal['symbol']):
+                await broadcast_signal_to_redis(signal)
                 if await initiate_real_trade(signal):
-                    trades_opened_count += 1
-                    available_slots -= 1
+                    trades_opened_count += 1; active_trades_count += 1
                     await asyncio.sleep(2)
         
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"duration_seconds": int(scan_duration), "checked_symbols": len(top_markets)}
         logger.info(f"Scan complete in {int(scan_duration)}s. Found {len(signals_found)} signals, opened {trades_opened_count} trades.")
 
-# --- معالجات واجهة المستخدم (Handlers) ---
+# --- Scheduled Jobs ---
+async def maestro_job(context: ContextTypes.DEFAULT_TYPE):
+    if not bot_data.settings.get('maestro_mode_enabled', True): return
+    logger.info("🎼 Maestro: Analyzing market regime and adjusting tactics...")
+    regime = await brain.get_market_regime(bot_data.exchange)
+    
+    if regime != "UNKNOWN" and regime != bot_data.current_market_regime:
+        bot_data.current_market_regime = regime
+        config = DECISION_MATRIX.get(regime, {})
+        if not config: return
+        changes_report = []
+        for key, value in config.items():
+            if key in bot_data.settings and bot_data.settings[key] != value:
+                old_value = bot_data.settings[key]
+                bot_data.settings[key] = value
+                changes_report.append(f"- `{key}` from `{old_value}` to `{value}`")
+        save_settings()
+        if changes_report:
+            report_text = "\n".join(changes_report)
+            active_scanners_str = ' + '.join([STRATEGY_NAMES_AR.get(s, s) for s in config.get('active_scanners', [])])
+            report = (f"🎼 **تقرير المايسترو | {regime}**\n"
+                      f"تم تعديل التكوين ليتناسب مع حالة السوق.\n\n"
+                      f"**أهم التغييرات:**\n{report_text}\n\n"
+                      f"**الاستراتيجيات النشطة الآن:**\n{active_scanners_str}")
+            await safe_send_message(context.bot, report)
+
+# --- Telegram UI & Bot Startup ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
     await update.message.reply_text("أهلاً بك في **Wise Maestro Bot**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
@@ -385,6 +418,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
+    # Handle blacklist
     if 'blacklist_action' in context.user_data:
         action = context.user_data.pop('blacklist_action')
         blacklist = bot_data.settings.get('asset_blacklist', [])
@@ -396,7 +430,12 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         save_settings()
         await update.message.reply_text(f"✅ تم تحديث القائمة السوداء.")
+        # Refresh menu
+        dummy_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer': (lambda *args, **kwargs: asyncio.sleep(0))})
+        await ui_handlers.show_blacklist_menu(Update(update.update_id, callback_query=dummy_query), context)
         return
+
+    # Handle other parameters
     if not (setting_key := context.user_data.get('setting_to_change')): return
     try:
         keys = setting_key.split('_'); current_level = bot_data.settings
@@ -410,26 +449,35 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ قيمة غير صالحة.")
     finally:
         if 'setting_to_change' in context.user_data: del context.user_data['setting_to_change']
-        
+
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     route_map = {
-        "db_stats": ui_handlers.show_stats_command, "db_trades": ui_handlers.show_trades_command, 
-        "db_history": ui_handlers.show_trade_history_command, "db_mood": ui_handlers.show_mood_command, 
-        "db_diagnostics": ui_handlers.show_diagnostics_command, "back_to_dashboard": ui_handlers.show_dashboard_command,
-        "db_portfolio": ui_handlers.show_portfolio_command, "db_manual_scan": (lambda u,c: c.job_queue.run_once(perform_scan, 1)),
-        "settings_main": ui_handlers.show_settings_menu, "settings_params": ui_handlers.show_parameters_menu, 
-        "settings_scanners": ui_handlers.show_scanners_menu, "settings_presets": ui_handlers.show_presets_menu, 
-        "settings_blacklist": ui_handlers.show_blacklist_menu, "settings_data": ui_handlers.show_data_management_menu,
-        "settings_adaptive": ui_handlers.show_adaptive_intelligence_menu, "noop": (lambda u,c: None)
+        "db_stats": ui_handlers.show_stats_command, 
+        "db_trades": ui_handlers.show_trades_command, 
+        "db_history": ui_handlers.show_trade_history_command,
+        "db_mood": ui_handlers.show_mood_command, 
+        "db_diagnostics": ui_handlers.show_diagnostics_command, 
+        "back_to_dashboard": ui_handlers.show_dashboard_command,
+        "db_portfolio": ui_handlers.show_portfolio_command, 
+        "db_manual_scan": (lambda u,c: context.job_queue.run_once(perform_scan, 1)),
+        "settings_main": ui_handlers.show_settings_menu, 
+        "settings_params": ui_handlers.show_parameters_menu, 
+        "settings_scanners": ui_handlers.show_scanners_menu,
+        "settings_presets": ui_handlers.show_presets_menu, 
+        "settings_blacklist": ui_handlers.show_blacklist_menu, 
+        "settings_data": ui_handlers.show_data_management_menu,
+        "settings_adaptive": ui_handlers.show_adaptive_intelligence_menu,
+        "noop": (lambda u,c: None)
     }
+    
     if data in route_map: await route_map[data](update, context)
     elif data.startswith("check_"): await ui_handlers.check_trade_details(update, context)
     elif data.startswith("manual_sell_confirm_"): await ui_handlers.handle_manual_sell_confirmation(update, context)
     elif data.startswith("manual_sell_execute_"): await ui_handlers.handle_manual_sell_execute(update, context)
     elif data == "kill_switch_toggle":
         bot_data.trading_enabled = not bot_data.trading_enabled
-        await query.answer("✅ تم التبديل" if bot_data.trading_enabled else "🚨 تم الإيقاف", show_alert=not bot_data.trading_enabled)
+        await query.answer("✅ Trading Resumed" if bot_data.trading_enabled else "🚨 Kill Switch Activated", show_alert=not bot_data.trading_enabled)
         await ui_handlers.show_dashboard_command(update, context)
     elif data.startswith("scanner_toggle_"):
         key = data.replace("scanner_toggle_", "")
@@ -441,7 +489,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await ui_handlers.show_scanners_menu(update, context)
     elif data.startswith("param_set_"):
         context.user_data['setting_to_change'] = data.replace("param_set_", "")
-        await query.message.reply_text(f"أرسل القيمة الجديدة لـ `{context.user_data['setting_to_change']}`:")
+        await query.message.reply_text(f"Enter new value for `{context.user_data['setting_to_change']}`:")
     elif data.startswith("param_toggle_"):
         key = data.replace("param_toggle_", "")
         bot_data.settings[key] = not bot_data.settings.get(key, False)
@@ -449,49 +497,63 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         if "adaptive" in key or "strategy" in key: await ui_handlers.show_adaptive_intelligence_menu(update, context)
         else: await ui_handlers.show_parameters_menu(update, context)
 
-# --- التشغيل والإيقاف ---
 async def post_init(application: Application):
     logger.info("Performing post-initialization for Wise Maestro Bot...")
     if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
-        logger.critical("FATAL: Missing one or more required environment variables."); return
-    
+        logger.critical("FATAL: Missing critical environment variables."); return
+    try:
+        bot_data.redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        await bot_data.redis_client.ping()
+        logger.info("✅ Successfully connected to Redis server.")
+    except Exception as e:
+        logger.warning(f"Could not connect to Redis: {e}. Broadcasting disabled.")
+        bot_data.redis_client = None
+
     bot_data.application = application
     bot_data.exchange = ccxt.binance({'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
     try:
         await bot_data.exchange.load_markets()
-        await bot_data.exchange.fetch_balance()
-        logger.info("✅ Successfully connected to Binance Spot.")
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}"); return
 
+    logger.info("Reconciling SPOT trading state with Binance exchange...")
+    try:
+        balance = await bot_data.exchange.fetch_balance()
+        owned_assets = {asset for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0.00001}
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            trades_in_db = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+            for trade in trades_in_db:
+                if trade['symbol'].split('/')[0] not in owned_assets:
+                    logger.warning(f"Reconcile: Trade #{trade['id']} found active in DB, but asset not in wallet. Marking as 'Manually Closed'.")
+                    await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً' WHERE id = ?", (trade['id'],))
+            await conn.commit()
+        logger.info("State reconciliation complete.")
+    except Exception as e:
+        logger.error(f"Failed to reconcile state with exchange: {e}")
+    
     load_settings()
     await init_database()
 
-    # 1. تهيئة مدير WebSocket
     bot_data.websocket_manager = WebSocketManager(bot_data.exchange, application)
     asyncio.create_task(bot_data.websocket_manager.run())
     await bot_data.websocket_manager.sync_subscriptions()
     
-    # 2. تهيئة وحدات الذكاء
-    logger.info("Initializing the Maestro Guardian...")
-    guardian = MaestroGuardian(bot_data.exchange, application, bot_data, DB_FILE)
-    bot_data.guardian = guardian
+    bot_data.guardian = MaestroGuardian(bot_data.exchange, application, bot_data, DB_FILE)
+    bot_data.smart_brain = EvolutionaryEngine(bot_data.exchange, application, DB_FILE)
 
-    logger.info("Initializing the Evolutionary Engine...")
-    smart_brain = EvolutionaryEngine(bot_data.exchange, DB_FILE)
-    bot_data.smart_brain = smart_brain
-
-    # 3. جدولة المهام المتقدمة
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
-    jq.run_repeating(guardian.the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="supervisor_job")
-    jq.run_repeating(guardian.intelligent_reviewer_job, interval=3600, first=60, name="intelligent_reviewer")
-    jq.run_repeating(guardian.review_open_trades, interval=14400, first=120, name="wise_man_review")
-    jq.run_repeating(guardian.review_portfolio_risk, interval=86400, first=180, name="portfolio_risk_review")
-
+    jq.run_repeating(bot_data.guardian.the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="supervisor_job")
+    jq.run_repeating(bot_data.guardian.intelligent_reviewer_job, interval=3600, first=60, name="intelligent_reviewer")
+    jq.run_repeating(bot_data.guardian.review_open_trades, interval=14400, first=120, name="wise_man_review")
+    jq.run_repeating(bot_data.guardian.review_portfolio_risk, interval=86400, first=180, name="portfolio_risk_review")
+    jq.run_repeating(maestro_job, interval=MAESTRO_INTERVAL_HOURS * 3600, first=5, name="maestro_job")
+    jq.run_daily(bot_data.smart_brain.run_pattern_discovery, time=dt_time(hour=22, minute=0, tzinfo=EGYPT_TZ), name='pattern_discovery_job')
+    
     logger.info(f"All jobs scheduled. Maestro is now fully active.")
     try: 
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 Wise Maestro Bot - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 Wise Maestro Bot (Final Fusion) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- Wise Maestro Bot is now fully operational ---")
@@ -499,6 +561,7 @@ async def post_init(application: Application):
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
     if bot_data.websocket_manager: await bot_data.websocket_manager.stop()
+    if bot_data.redis_client: await bot_data.redis_client.close()
     logger.info("Bot has shut down gracefully.")
 
 def main():
