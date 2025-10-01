@@ -9,7 +9,6 @@ from collections import defaultdict
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 SUPERVISOR_INTERVAL_SECONDS = 180
-TIME_SYNC_INTERVAL_SECONDS = 3600
 STRATEGY_ANALYSIS_INTERVAL_SECONDS = 21600 # 6 hours
 MAESTRO_INTERVAL_HOURS = 1 # 1 hour for market regime check
 
@@ -40,7 +39,7 @@ DEFAULT_SETTINGS = {
     "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": True},
     "spread_filter": {"max_spread_percent": 0.5},
     "volume_filter_multiplier": 2.0,
-    "whale_radar_threshold_usd": 30000.0, # <-- السطر الجديد
+    "whale_radar_threshold_usd": 30000.0,
     # Closure & Notifications
     "close_retries": 3,
     "incremental_notifications_enabled": True,
@@ -53,12 +52,12 @@ DEFAULT_SETTINGS = {
     "strategy_deactivation_threshold_wr": 45.0,
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
-    # Maestro & Reviewer
-    "intelligent_reviewer_enabled": True, 
-    "momentum_scalp_mode_enabled": False, 
+    # Maestro & Reviewer (from OKX Bot)
+    "intelligent_reviewer_enabled": True,
+    "momentum_scalp_mode_enabled": False,
     "momentum_scalp_target_percent": 0.5,
-    "multi_timeframe_confluence_enabled": True, 
-    "maestro_mode_enabled": True, 
+    "multi_timeframe_confluence_enabled": True,
+    "maestro_mode_enabled": True,
 }
 
 # --- الأسماء العربية للاستراتيجيات ---
@@ -71,10 +70,38 @@ STRATEGY_NAMES_AR = {
 
 # --- مصفوفة قرارات المايسترو (Maestro Decision Matrix) ---
 DECISION_MATRIX = {
-    "TRENDING_HIGH_VOLATILITY": {"risk_reward_ratio": 1.5, "volume_filter_multiplier": 2.5},
-    "TRENDING_LOW_VOLATILITY": {"risk_reward_ratio": 2.5, "volume_filter_multiplier": 1.5},
-    "SIDEWAYS_HIGH_VOLATILITY": {"risk_reward_ratio": 2.0, "volume_filter_multiplier": 2.0},
-    "SIDEWAYS_LOW_VOLATILITY": {"risk_reward_ratio": 3.0, "volume_filter_multiplier": 1.0}
+    "TRENDING_HIGH_VOLATILITY": {
+        "intelligent_reviewer_enabled": True,
+        "momentum_scalp_mode_enabled": True,
+        "multi_timeframe_confluence_enabled": True,
+        "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "sniper_pro", "whale_radar"],
+        "risk_reward_ratio": 1.5,
+        "volume_filter_multiplier": 2.5
+    },
+    "TRENDING_LOW_VOLATILITY": {
+        "intelligent_reviewer_enabled": True,
+        "momentum_scalp_mode_enabled": False,
+        "multi_timeframe_confluence_enabled": True,
+        "active_scanners": ["support_rebound", "supertrend_pullback", "rsi_divergence"],
+        "risk_reward_ratio": 2.5,
+        "volume_filter_multiplier": 1.5
+    },
+    "SIDEWAYS_HIGH_VOLATILITY": {
+        "intelligent_reviewer_enabled": True,
+        "momentum_scalp_mode_enabled": True,
+        "multi_timeframe_confluence_enabled": False,
+        "active_scanners": ["bollinger_reversal", "rsi_divergence", "breakout_squeeze_pro"],
+        "risk_reward_ratio": 2.0,
+        "volume_filter_multiplier": 2.0
+    },
+    "SIDEWAYS_LOW_VOLATILITY": {
+        "intelligent_reviewer_enabled": False,
+        "momentum_scalp_mode_enabled": False,
+        "multi_timeframe_confluence_enabled": True,
+        "active_scanners": ["bollinger_reversal", "support_rebound"],
+        "risk_reward_ratio": 3.0,
+        "volume_filter_multiplier": 1.0
+    }
 }
 
 # --- قوالب الإعدادات الجاهزة (Presets) ---
@@ -84,13 +111,13 @@ SETTINGS_PRESETS = {
     "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20},
 }
 
-# --- قواعد إدارة مخاطر المحفظة (للرجل الحكيم) ---
+# --- قواعد إدارة مخاطر المحفظة ---
 PORTFOLIO_RISK_RULES = {
     "max_asset_concentration_pct": 30.0,
     "max_sector_concentration_pct": 50.0,
 }
 
-# --- تصنيف العملات حسب القطاع (للرجل الحكيم) ---
+# --- تصنيف العملات حسب القطاع ---
 SECTOR_MAP = {
     'RNDR': 'AI', 'FET': 'AI', 'AGIX': 'AI', 'NEAR': 'AI',
     'UNI': 'DeFi', 'AAVE': 'DeFi', 'LDO': 'DeFi', 'MKR': 'DeFi',
