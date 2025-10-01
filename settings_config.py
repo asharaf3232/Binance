@@ -40,6 +40,7 @@ DEFAULT_SETTINGS = {
     "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": True},
     "spread_filter": {"max_spread_percent": 0.5},
     "volume_filter_multiplier": 2.0,
+    "whale_radar_threshold_usd": 30000.0, # <-- السطر الجديد
     # Closure & Notifications
     "close_retries": 3,
     "incremental_notifications_enabled": True,
@@ -53,11 +54,11 @@ DEFAULT_SETTINGS = {
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
     # Maestro & Reviewer
-    "intelligent_reviewer_enabled": True, # المراجع الذكي
-    "momentum_scalp_mode_enabled": False, # وضع اقتناص الزخم
+    "intelligent_reviewer_enabled": True, 
+    "momentum_scalp_mode_enabled": False, 
     "momentum_scalp_target_percent": 0.5,
-    "multi_timeframe_confluence_enabled": True, # فلتر التوافق الزمني
-    "maestro_mode_enabled": True, # المايسترو
+    "multi_timeframe_confluence_enabled": True, 
+    "maestro_mode_enabled": True, 
 }
 
 # --- الأسماء العربية للاستراتيجيات ---
@@ -69,60 +70,18 @@ STRATEGY_NAMES_AR = {
 }
 
 # --- مصفوفة قرارات المايسترو (Maestro Decision Matrix) ---
-# يتم تطبيق هذه الإعدادات بناءً على نمط السوق الذي تحدده دالة get_market_regime
 DECISION_MATRIX = {
-    "TRENDING_HIGH_VOLATILITY": {
-        "intelligent_reviewer_enabled": True,
-        "momentum_scalp_mode_enabled": True,
-        "multi_timeframe_confluence_enabled": True,
-        "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "sniper_pro", "whale_radar"],
-        "risk_reward_ratio": 1.5,
-        "volume_filter_multiplier": 2.5
-    },
-    "TRENDING_LOW_VOLATILITY": {
-        "intelligent_reviewer_enabled": True,
-        "momentum_scalp_mode_enabled": False,
-        "multi_timeframe_confluence_enabled": True,
-        "active_scanners": ["support_rebound", "supertrend_pullback", "rsi_divergence"],
-        "risk_reward_ratio": 2.5,
-        "volume_filter_multiplier": 1.5
-    },
-    "SIDEWAYS_HIGH_VOLATILITY": {
-        "intelligent_reviewer_enabled": True,
-        "momentum_scalp_mode_enabled": True,
-        "multi_timeframe_confluence_enabled": False,
-        "active_scanners": ["bollinger_reversal", "rsi_divergence", "breakout_squeeze_pro"],
-        "risk_reward_ratio": 2.0,
-        "volume_filter_multiplier": 2.0
-    },
-    "SIDEWAYS_LOW_VOLATILITY": {
-        "intelligent_reviewer_enabled": False,
-        "momentum_scalp_mode_enabled": False,
-        "multi_timeframe_confluence_enabled": True,
-        "active_scanners": ["bollinger_reversal", "support_rebound"],
-        "risk_reward_ratio": 3.0,
-        "volume_filter_multiplier": 1.0
-    }
+    "TRENDING_HIGH_VOLATILITY": {"risk_reward_ratio": 1.5, "volume_filter_multiplier": 2.5},
+    "TRENDING_LOW_VOLATILITY": {"risk_reward_ratio": 2.5, "volume_filter_multiplier": 1.5},
+    "SIDEWAYS_HIGH_VOLATILITY": {"risk_reward_ratio": 2.0, "volume_filter_multiplier": 2.0},
+    "SIDEWAYS_LOW_VOLATILITY": {"risk_reward_ratio": 3.0, "volume_filter_multiplier": 1.0}
 }
 
 # --- قوالب الإعدادات الجاهزة (Presets) ---
-# يتم إنشاؤها من DEFAULT_SETTINGS لتجنب التكرار
 SETTINGS_PRESETS = {
     "professional": copy.deepcopy(DEFAULT_SETTINGS),
-    "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
-    "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
-    "very_lenient": {
-        **copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 12, "adx_filter_enabled": False,
-        "market_mood_filter_enabled": False, "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": False},
-        "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
-        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.4}, "spread_filter": {"max_spread_percent": 1.5}
-    },
-    "bold_heart": {
-        **copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 15, "risk_reward_ratio": 1.5, "multi_timeframe_enabled": False,
-        "market_mood_filter_enabled": False, "adx_filter_enabled": False, "btc_trend_filter_enabled": False, "news_filter_enabled": False,
-        "volume_filter_multiplier": 1.0, "liquidity_filters": {"min_quote_volume_24h_usd": 100000, "min_rvol": 1.0},
-        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.2}, "spread_filter": {"max_spread_percent": 2.0}
-    }
+    "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28},
+    "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20},
 }
 
 # --- قواعد إدارة مخاطر المحفظة (للرجل الحكيم) ---
