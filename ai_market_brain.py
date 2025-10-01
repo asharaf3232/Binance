@@ -59,7 +59,6 @@ async def get_alpha_vantage_economic_events(api_key: str):
             header = [h.strip() for h in lines[0].split(',')]
             events = [dict(zip(header, [v.strip() for v in line.split(',')])) for line in lines[1:]]
             
-            # فلترة الأحداث الهامة لليوم الحالي (USD/EUR)
             high_impact_events = [e.get('event', 'Unknown Event') for e in events if e.get('releaseDate', '') == today_str and e.get('impact', '').lower() == 'high' and e.get('country', '') in ['USD', 'EUR']]
             return high_impact_events
     except Exception as e:
@@ -115,8 +114,8 @@ async def get_market_regime(exchange):
         else:
             atr_percent = 0.0
 
-        # تعريف مستويات التقلب (ممكن تعديل هذه القيم حسب المنصة)
-        if atr_percent > 1.0: # إذا كان ATR% > 1% يعتبر تقلب عالي
+        # تعريف مستويات التقلب
+        if atr_percent > 1.5: # إذا كان ATR% > 1.5% يعتبر تقلب عالي
             vol = "HIGH_VOLATILITY"
         else:
             vol = "LOW_VOLATILITY"
